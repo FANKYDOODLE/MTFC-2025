@@ -1,0 +1,171 @@
+---
+title: "HAB Analysis for Maumee River/Lake Erie"
+output:
+  html_document:
+    toc: yes
+    toc_depth: 3
+    toc_float: yes
+editor_options: 
+  markdown: 
+    wrap: 72
+---
+
+```{r setup, include=FALSE}
+#knitr::opts_chunk$set(echo = F)
+#options(knitr.kable.NA = '')  # replace NA with blank
+```
+
+<!-- Load package -->
+
+<!-- shortcut: -->
+
+<!-- insert R chuck:  ctrl+alt+I -->
+
+<!-- knit the file:  ctrl+shift+K -->
+
+<!-- run current chuck: Ctrl+shift+enter  -->
+
+### Load package
+
+```{r, message=FALSE, warning=FALSE}
+library(tidyverse)
+library(readxl)
+library(ggpubr)
+
+```
+
+
+### Load data
+```{r}
+df=  read_xlsx("Lake_erie/NOAA_NCCOS_2000to2025_Curated_HAB_Annual_Severity.xlsx") 
+
+```
+
+
+### Recode data for severity index as categorical
+
+```{r}
+df2 <- df %>%
+  mutate(
+    severity = case_when(
+      severity_index <= 1 ~ "No Bloom (SI: 0–1)",
+      severity_index <= 3 ~ "Mild Bloom (SI: 1–3)",
+      severity_index <= 5 ~ "Moderate Bloom (SI: 3–5)",
+      severity_index <= 7 ~ "Severe Bloom (SI: 5–7)",
+      TRUE              ~ "Very Severe Bloom (SI: >7)"
+    ),
+    severity = factor(
+      severity,
+      levels = c(
+        "No Bloom (SI: 0–1)",
+        "Mild Bloom (SI: 1–3)",
+        "Moderate Bloom (SI: 3–5)",
+        "Severe Bloom (SI: 5–7)",
+        "Very Severe Bloom (SI: >7)"
+      )
+    )
+  )
+
+```
+
+
+### Plot the severity index
+
+```{r, fig.width=10, fig.height=4}
+
+p=ggplot(df2%>%filter(year<2025), aes(x = factor(year), y = severity_index)) +
+  geom_hline(yintercept = c(1, 3, 5, 7, 9),
+             linetype = "dashed",
+             color = "orange",
+             linewidth = 0.5) +
+  geom_col(aes(fill = severity),
+           width = 0.85,
+           color = "black",
+           linewidth = 0.25) +
+  scale_y_continuous(
+    breaks = c(1, 3, 5, 7, 9, 11),
+    limits = c(0, 11),
+    expand = expansion(mult = c(0, 0.05))
+  ) +
+  geom_line(aes(group = 1), color = "black", linewidth = 0.7) +
+  geom_point(color = "black", size = 1.8) +
+  scale_fill_manual(
+    values = c(
+      "No Bloom (SI: 0–1)"         = "#ffffff",  # white
+      "Mild Bloom (SI: 1–3)"       = "#fff7bc",  # light yellow
+      "Moderate Bloom (SI: 3–5)"   = "#fec44f",  # orange
+      "Severe Bloom (SI: 5–7)"     = "#fc4e2a",  # red-orange
+      "Very Severe Bloom (SI: >7)" = "#99000d"   # dark red
+    ),
+    name = NULL
+  ) +
+  labs(
+    x = NULL,
+    y = "Bloom Severity",
+    title = "Bloom Severity Index (SI)"
+  ) +
+  theme_classic(base_size = 12) +
+  theme(
+    axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1),
+    legend.position = "top"
+  )
+
+p
+```
+
+
+### Plot the total_CI_avg_30d
+
+
+```{r, fig.width=10, fig.height=4}
+p2 <- ggplot(df2, aes(x = factor(year), y = total_CI_avg_30d)) +
+   geom_hline(yintercept = c(20, 40, 60),
+             linetype = "dashed",
+             color = "gray70",
+             linewidth = 0.5)+
+  geom_line(aes(group = 1), color = "blue", linewidth = 0.7) +
+  geom_point(color = "gray20", size = 1.8) +
+  labs(
+    x = NULL,
+    y = "total CI average 30 d",
+    title = "Cyanobacterial index (CI) avg 30d "
+
+  ) +
+  scale_y_continuous(expand = expansion(mult = c(0, 0.05))) +
+  theme_classic(base_size = 12) +
+  theme(
+    axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1),
+    legend.position = "top"
+  )
+
+p2
+```
+
+
+
+### Show two plots together 
+
+```{r, fig.width=10, fig.height=6}
+p  <- p  + theme(plot.margin = margin(t = 10, r = 10, b = 10, l = 10))
+p2 <- p2 + theme(plot.margin = margin(t = 30, r = 10, b = 10, l = 10))
+
+ggarrange(p, p2,
+          ncol = 1, nrow = 2)
+
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
