@@ -1,0 +1,710 @@
+---
+title: "Eutrophication-agricultural Analysis for Maumee River/Lake Erie"
+author: "FL"
+output:
+  html_document:
+    code_folding: hide
+    toc: yes
+    toc_depth: 3
+    toc_float: yes
+editor_options: 
+  markdown: 
+    wrap: 72
+---
+
+
+```{r setup, include=FALSE}
+#knitr::opts_chunk$set(echo = F)
+options(knitr.kable.NA = '')  # replace NA with blank
+```
+
+<!-- Load package -->
+
+<!-- shortcut: -->
+
+<!-- insert R chuck:  ctrl+alt+I -->
+
+<!-- knit the file:  ctrl+shift+K -->
+
+<!-- run current chuck: Ctrl+shift+enter  -->
+
+
+## 1) Install/load packages
+
+```{r, warning=FALSE,message=FALSE, include=T}
+# load packages
+#install.packages(c("dataRetrieval","dplyr","lubridate","ggplot2","readr","stringr","tidyr"))
+library(dataRetrieval)
+library(dplyr)
+library(lubridate)
+library(ggplot2)
+library(stringr)
+library(tidyr)
+library(tidyverse)
+```
+
+
+### 2) Get Maumee watershed polygons (USGS WBD) in R
+
+```{r}
+library(httr)
+library(sf)
+library(jsonlite)
+```
+
+
+```{r}
+wbd <- "https://hydro.nationalmap.gov/arcgis/rest/services/wbd/MapServer"
+
+# HUC8 layer is commonly 4 in this service; you can confirm in the MapServer directory.
+layer_id <- 4
+
+# Pull HUC8 features whose name includes "Maumee" (may return multiple features)
+res <- GET(
+  paste0(wbd, "/", layer_id, "/query"),
+  query = list(
+    where = "Name LIKE '%Maumee%'",
+    outFields = "*",
+    returnGeometry = "true",
+    f = "geojson"
+  )
+)
+
+maumee_huc8 <- st_read(content(res, as="text", encoding="UTF-8"), quiet = TRUE)
+st_write(maumee_huc8, "maumee_huc8.geojson", delete_dsn = TRUE)
+```
+
+### 2) Land use / crops: download CDL for your AOI using CropScapeR
+
+GetCDLData() can take an sf AOI and (for type = "b") automatically uses the AOI’s bounding box to request a GeoTIFF from CropScape.
+
+
+```{r}
+library(CropScapeR)
+library(terra)
+library(sf)
+```
+
+
+```{r}
+ws <- st_read("maumee_huc8.geojson", quiet = TRUE)
+
+# Download CDL for the AOI bounding box (fast + reliable)
+cdl_2024 <- GetCDLData(
+  aoi = ws,
+  year = 2024,
+  type = "b",
+  save_path = "cdl_2024_bbox.tif",
+  readr = TRUE
+)
+
+# Clip to watershed polygon
+r <- rast("cdl_2024_bbox.tif")
+ws_r <- vect(st_transform(ws, crs(r)))
+cdl_clip <- mask(crop(r, ws_r), ws_r)
+writeRaster(cdl_clip, "cdl_2024_maumee.tif", overwrite = TRUE)
+```
+
+### 3) Crop acreage by class inside the watershed (from CDL raster)
+
+
+```{r}
+library(terra)
+library(dplyr)
+```
+
+
+```{r}
+
+cdl <- rast("cdl_2024_maumee.tif")
+
+# If your raster is in lon/lat (degrees), project to an equal-area CRS first
+if (is.lonlat(cdl)) {
+  cdl <- project(cdl, "EPSG:5070", method="near")  # NAD83 / Conus Albers (good for area)
+}
+
+cell_ha <- cellSize(cdl, unit = "ha")
+cell_ac <- cell_ha * 2.47105381
+
+```
+
+
+### Crop distribution: acres + percent by CDL class Compute acres by CDL code
+
+```{r}
+library(dplyr)
+
+# Make sure NA cells are masked out
+cell_ac <- cellSize(cdl, unit="ha") * 2.47105381
+
+v  <- values(cdl, mat=FALSE)
+ac <- values(cell_ac, mat=FALSE)
+
+tab <- tibble(class = v, acres = ac) |>
+  filter(!is.na(class)) |>
+  group_by(class) |>
+  summarise(acres = sum(acres, na.rm=TRUE), .groups="drop") |>
+  arrange(desc(acres))
+
+tab |> head(5)
+```
+
+
+
+
+```{r}
+# this is most recent data for 2025
+crop_lut <- tibble(
+  class = c(1, 5, 24, 4, 28, 36, 37, 41, 42),
+  crop  = c("Corn", "Soybeans", "Winter Wheat", "Sorghum",
+            "Oats", "Alfalfa", "Other Hay", "Sugarbeets", "Dry Beans")
+)
+
+main <- tab |>
+  inner_join(crop_lut, by="class") |>
+  mutate(percent = 100 * acres / sum(acres)) |>
+  arrange(desc(acres))
+
+main
+```
+
+**Note**: Fertilizer Needs of Soybean, Corn, Wheat, and Alfalfa
+Soybean, corn, wheat, and alfalfa require phosphorus fertilizers, but the amount needed can vary based on soil test results and the specific nutrient requirements of the crops.
+
+
+3) “Top crops” including anything not in your lookup (optional)
+
+This gives you the top N classes by acres, whether labeled or not:
+
+```{r}
+topN <- 15
+top <- tab |>
+  mutate(percent = 100 * acres / sum(acres)) |>
+  slice_head(n = topN)
+
+top
+
+barplot(main$percent, names.arg = main$crop, las=2,
+        ylab="Percent of cropped area (within watershed)",
+        main="Main crops in Maumee watershed (CDL)")
+
+```
+
+###  to get the crops types for the top crops from 2008 to current:
+
+```{r}
+# ============================================================
+# CDL crop time series for a watershed (Maumee) — 2008 to present
+# Crops: Corn, Soybeans, Winter Wheat, Alfalfa
+# - Downloads CDL GeoTIFFs via CropScapeR (bbox of watershed)
+# - Clips to watershed, computes acres + percent for each crop
+# - Saves CSV (long + wide) and makes a trend plot
+# ============================================================
+
+library(sf)
+library(terra)
+library(dplyr)
+library(purrr)
+library(tidyr)
+library(CropScapeR)
+library(ggplot2)
+
+# ----------------------------
+# USER INPUTS
+# ----------------------------
+watershed_file <- "maumee_huc8.geojson"     # watershed polygon (GeoJSON/Shapefile)
+out_dir <- "cdl_maumee_timeseries"          # output folder
+start_year <- 2008
+```
+
+
+```{r}
+# ----------------------------
+# SETUP
+# ----------------------------
+dir.create(out_dir, showWarnings = FALSE, recursive = TRUE)
+dir.create(file.path(out_dir, "rasters_bbox"), showWarnings = FALSE, recursive = TRUE)
+
+# Equal-area CRS for accurate area
+aea <- "EPSG:5070"
+
+# Read watershed and project to equal-area
+ws_sf <- st_read(watershed_file, quiet = TRUE) |>
+  st_make_valid() |>
+  st_transform(aea)
+
+ws_vect <- vect(ws_sf)
+
+# Crop lookup (CDL class codes)
+crop_lut <- tibble(
+  cdl_code = c(1, 5, 24, 36),
+  crop     = c("Corn", "Soybeans", "Winter Wheat", "Alfalfa")
+)
+
+# Year range
+this_year <- as.integer(format(Sys.Date(), "%Y")) #2025 , up to present 
+years <- start_year:this_year
+```
+
+
+```{r}
+# ----------------------------
+# FUNCTION: compute crop acres for one year
+# ----------------------------
+crops_one_year <- function(year, ws_sf_aea, ws_vect_aea, crop_lut, out_dir) {
+
+  tif_bbox <- file.path(out_dir, "rasters_bbox", paste0("cdl_", year, "_bbox.tif"))
+
+  # 1) Download once (cache)
+  if (!file.exists(tif_bbox)) {
+    message("Downloading CDL for ", year, " ...")
+    ok <- tryCatch({
+      GetCDLData(
+        aoi = ws_sf_aea,
+        year = year,
+        type = "b",              # bbox of AOI
+        save_path = tif_bbox,
+        readr = FALSE
+      )
+      TRUE
+    }, error = function(e) {
+      message("  Failed to download year ", year, ": ", conditionMessage(e))
+      FALSE
+    })
+
+    if (!ok) {
+      return(tibble(
+        year = year, crop = crop_lut$crop,
+        acres = NA_real_, percent_of_watershed = NA_real_
+      ))
+    }
+  } else {
+    message("Using cached CDL for ", year)
+  }
+
+  # 2) Read raster
+  r <- tryCatch(rast(tif_bbox), error = function(e) NULL)
+  if (is.null(r)) {
+    return(tibble(
+      year = year, crop = crop_lut$crop,
+      acres = NA_real_, percent_of_watershed = NA_real_
+    ))
+  }
+
+  # 3) Project to equal-area, nearest neighbor preserves classes
+  if (crs(r) != crs(ws_vect_aea)) {
+    r <- project(r, crs(ws_vect_aea), method = "near")
+  }
+
+  # 4) Clip to watershed
+  r <- mask(crop(r, ws_vect_aea), ws_vect_aea)
+
+  # 5) Compute per-cell area in acres
+  area_ac <- cellSize(r, unit = "ha") * 2.47105381
+
+  # Total watershed acres (from rasterized AOI extent after masking)
+  total_ac <- global(area_ac, sum, na.rm = TRUE)[1, 1]
+  total_ac <- as.numeric(total_ac)
+
+  # 6) For each crop code: sum area where r == code
+  out <- crop_lut |>
+    mutate(acres = map_dbl(cdl_code, function(code) {
+      m <- (r == code)
+      x <- global(area_ac * m, sum, na.rm = TRUE)[1, 1]
+      as.numeric(x)
+    })) |>
+    transmute(
+      year = year,
+      crop = crop,
+      acres = acres,
+      percent_of_watershed = 100 * acres / total_ac
+    )
+
+  out
+}
+```
+
+
+```{r}
+# ----------------------------
+# RUN TIME SERIES (long format)
+# ----------------------------
+ts_long <- map_dfr(
+  years,
+  crops_one_year,
+  ws_sf_aea = ws_sf,
+  ws_vect_aea = ws_vect,
+  crop_lut = crop_lut,
+  out_dir = out_dir
+) |>
+  arrange(year, crop)
+```
+
+
+```{r}
+# ----------------------------
+# SAVE CSV (long)
+# ----------------------------
+csv_long <- file.path(out_dir, "maumee_cdl_crops_timeseries_2008_present_long.csv")
+write.csv(ts_long, csv_long, row.names = FALSE)
+message("Saved long CSV: ", csv_long)
+
+# ----------------------------
+# SAVE CSV (wide: one column per crop)
+# ----------------------------
+ts_wide <- ts_long |>
+  select(year, crop, acres) |>
+  pivot_wider(names_from = crop, values_from = acres)
+
+csv_wide <- file.path(out_dir, "maumee_cdl_crops_timeseries_2008_present_wide.csv")
+write.csv(ts_wide, csv_wide, row.names = FALSE)
+message("Saved wide CSV: ", csv_wide)
+```
+
+
+```{r}
+# ----------------------------
+# PLOT: acres over time
+# ----------------------------
+ts_plot <- ts_long |>
+  filter(!is.na(acres))
+
+p <- ggplot(ts_plot, aes(x = year, y = acres, group = crop)) +
+  geom_line() +
+  geom_point() +
+  facet_wrap(~ crop, scales = "free_y", ncol = 2) +
+  labs(
+    title = "Major crops in Maumee watershed (CDL)",
+    subtitle = "Crops: Corn, Soybeans, Winter Wheat, Alfalfa — 2008 to present",
+    x = "Year",
+    y = "Acres"
+  ) +
+  theme_minimal()
+
+print(p)
+
+plot_path <- file.path(out_dir, "maumee_major_crops_acres_faceted.png")
+ggsave(plot_path, p, width = 10, height = 6, dpi = 200)
+message("Saved plot: ", plot_path)
+```
+
+
+
+
+```{r}
+# ----------------------------
+# OPTIONAL: also plot percent of watershed
+# ----------------------------
+p_pct <- ggplot(ts_plot, aes(x = year, y = percent_of_watershed, group = crop)) +
+  geom_line() +
+  geom_point() +
+  facet_wrap(~ crop, scales = "free_y", ncol = 2) +
+  labs(
+    title = "Major crops as percent of Maumee watershed (CDL)",
+    x = "Year",
+    y = "Percent of watershed area (%)"
+  ) +
+  theme_minimal()
+
+print(p_pct)
+
+plot_pct_path <- file.path(out_dir, "maumee_major_crops_percent_faceted.png")
+ggsave(plot_pct_path, p_pct, width = 10, height = 6, dpi = 200)
+message("Saved plot: ", plot_pct_path)
+```
+
+A single combined line plot (all crops on one axis) for the four top crops.
+
+
+```{r}
+# ----------------------------
+# PLOT: acres over time (single combined line plot)
+# ----------------------------
+ts_plot <- ts_long |>
+  filter(!is.na(acres))
+
+
+# smooth outliers
+ts_plot$acres[ts_plot$year==2019 & ts_plot$crop=='Corn'] = mean(c( ts_plot$acres[ts_plot$year==2018 & ts_plot$crop=='Corn']  , 
+                                                                   ts_plot$acres[ts_plot$year==2020 & ts_plot$crop=='Corn'] ))
+```
+
+```{r}
+ts_plot$acres[ts_plot$year==2019 & ts_plot$crop=='Soybeans'] = mean(c( ts_plot$acres[ts_plot$year==2018 & ts_plot$crop=='Soybeans']  , 
+                                                                   ts_plot$acres[ts_plot$year==2020 & ts_plot$crop=='Soybeans'] ))
+
+```
+
+
+```{r}
+
+ts_plot$crop= factor(ts_plot$crop,  levels=  c("Soybeans", "Corn", "Winter Wheat","Alfalfa" )) 
+
+
+p_all <- ggplot(ts_plot, aes(x = year, y = acres, color = crop)) +
+  geom_line() +
+  geom_point() +
+  labs(
+    title = "Major crops in Maumee watershed (CDL)",
+    subtitle = "Corn, Soybeans, Winter Wheat, Alfalfa — 2008 to present",
+    x = "Year",
+    y = "Acres",
+    color = "Crop"
+  ) +
+  theme_minimal()
+
+print(p_all)
+
+```
+
+```{r}
+ggplot(ts_plot, aes(x = year, y = acres, color = crop)) +
+  geom_line() +
+  geom_point() +
+  scale_x_continuous(breaks = unique(ts_plot$year)) +   # show every year
+  labs(
+    title = "Major crops in Maumee watershed (CDL)",
+    subtitle = "Corn, Soybeans, Winter Wheat, Alfalfa — 2008 to present",
+    x = "Year",
+    y = "Acres",
+    color = "Crop"
+  ) +
+  theme_minimal() +
+  theme(
+    axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1, size = 8)
+  )
+```
+
+
+
+```{r}
+
+df <- read_csv( "Lake_erie/maumee_cdl_crops_timeseries_2008_to_2024_long.csv", show_col_types = FALSE)
+# expected columns: year, crop, acres
+```
+
+
+```{r}
+# ---- Constant P2O5 rates (same method as before) ----
+# NASS-style: avg lb P2O5 per planted acre = (%treated) * (lb/ac on treated acres)
+rates <- tibble::tribble(
+  ~crop,          ~pct_treated, ~rate_treated_lb_ac,
+  "Corn",         0.79,         69.0,
+  "Soybeans",     0.42,         55.0,
+  "Winter Wheat", 0.63,         31.0,
+  # Alfalfa: assumed constant "removal/maintenance" proxy (lb P2O5/ac)
+  # using 39.6 lb/ac as in the previous method
+  "Alfalfa",      1.00,         39.6
+) %>%
+  mutate(avg_lb_p2o5_per_ac = pct_treated * rate_treated_lb_ac)
+
+LB_TO_METRIC_TON <- 0.00045359237
+
+rates
+```
+
+
+```{r}
+# ---- Compute annual P2O5 by crop and total ----
+df_p <- df %>%
+  left_join(rates %>% select(crop, avg_lb_p2o5_per_ac), by = "crop") %>%
+  mutate(
+    p2o5_lb = acres * avg_lb_p2o5_per_ac,
+    p2o5_metric_ton = p2o5_lb * LB_TO_METRIC_TON
+  )
+
+annual_long <- df_p %>%
+  group_by(year, crop) %>%
+  summarise(p2o5_metric_ton = sum(p2o5_metric_ton, na.rm = TRUE), .groups = "drop")
+
+annual_total <- annual_long %>%
+  group_by(year) %>%
+  summarise(total_p2o5_metric_ton = sum(p2o5_metric_ton, na.rm = TRUE), .groups = "drop")
+
+# Optional: wide table (one column per crop + Total)
+annual_wide <- annual_long %>%
+  pivot_wider(names_from = crop, values_from = p2o5_metric_ton, values_fill = 0) %>%
+  mutate(Total = rowSums(across(where(is.numeric), ~ .x), na.rm = TRUE)) %>%
+  arrange(year)
+
+# ---- Save outputs ----
+#write_csv(annual_wide, "maumee_phosphate_use_timeseries_2008_2024_updated.csv")
+```
+
+
+```{r, fig.height=4,  fig.width=8}}
+# ---- Plot 1: Total time series (line) ----
+p_total <- ggplot(annual_total, aes(x = year, y = total_p2o5_metric_ton)) +
+  geom_line(linewidth = 0.8, color='dodgerblue') +
+  geom_point(size = 1.8) +
+  scale_y_continuous( limits = c(7000,10500)) +
+  labs(
+    x = "Year",
+    y = "P2O5 applied (metric tons)",
+    title = "Maumee watershed annual phosphate use (P2O5), 2008–2024",
+    #subtitle = "Constant crop-specific rates × CDL acres"
+  ) +
+  theme_minimal(base_size = 12)
+p_total
+
+#ggsave("maumee_p2o5_total_timeseries_2008_2024_updated.png", p_total,
+#       width = 10, height = 4, dpi = 200)
+```
+
+
+
+
+```{r}
+# ---- Plot 2: Stacked bar by crop ----
+# Set a consistent crop order (optional)
+annual_long$crop <- factor(annual_long$crop, levels = c("Corn", "Soybeans", "Winter Wheat", "Alfalfa"))
+
+p_stack <- ggplot(annual_long, aes(x = year, y = p2o5_metric_ton, fill = crop)) +
+  geom_col() +
+   labs(
+    x = "Year",
+    y = "P2O5 applied (metric tons)",
+    fill = "Crop",
+    title = "Maumee watershed annual phosphate use (P2O5) by crop, 2008–2024"
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(legend.position = "right")
+
+p_stack
+#ggsave("maumee_p2o5_by_crop_stacked_2008_2024_updated.png", p_stack,
+#       width = 10, height = 4.5, dpi = 200)
+```
+
+
+```{r, fig.height=4, fig.width=8}
+df_long <- annual_wide %>%
+  select(year, Corn, Soybeans, `Winter Wheat`, Alfalfa) %>%
+  pivot_longer(
+    cols = -year,
+    names_to = "crop",
+    values_to = "p2o5_metric_ton"
+  ) %>%
+  mutate(
+    # set a consistent stacking/legend order (bottom -> top)
+    crop = factor(crop, levels = rev(c("Corn", "Soybeans", "Winter Wheat", "Alfalfa")))
+  )
+
+# ---- Stacked AREA plot (matches your figure style) ----
+p_stack_area <- ggplot(df_long, aes(x = year, y = p2o5_metric_ton, fill = crop)) +
+  geom_area(alpha = 0.95) +
+  labs(
+    title = "Estimated phosphate (P2O5) fertilizer use by crop (2008–2024)",
+    #subtitle = "Assuming constant crop-specific rates",
+    x = "Year",
+    y = "P2O5 applied (metric tons)",
+    fill = "Crop"
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(
+    plot.title = element_text(hjust = 0.5, face = "bold"),
+    plot.subtitle = element_text(hjust = 0.5),
+    legend.position = "right"
+  )
+
+p_stack_area
+
+# Optional: save to file
+#ggsave("maumee_p2o5_by_crop_stacked_area_2008_2024.png",
+#       p_stack_area, width = 12, height = 6, dpi = 200)
+
+```
+
+
+```{r}
+## merge with TP data to check Phosphate use with TP load 
+Flow_HAB6= read.csv("Flow_HAB6.csv")
+```
+
+
+```{r}
+annual_total$year= annual_total$year-1
+
+Flow_HAB4=  merge( annual_total, Flow_HAB6,  by="year", all=T)
+```
+
+
+
+
+```{r}
+corp <- df %>%
+  pivot_wider(names_from = crop, values_from = acres) %>%
+  arrange(year)
+
+corp$year= corp$year-1
+
+## merge with TP data to check Phosphate use with TP load 
+
+
+Flow_HAB5=  merge( corp, Flow_HAB4,  by="year", all=T)
+```
+
+
+```{r}
+#annual_avg_data= rename(annual_avg_data, year= Year)
+
+Corp_flow=merge( corp, annual_total,  by="year", all=T)
+```
+  
+  
+  
+
+### Positively correlated
+
+```{r, fig.width=6, fig.height=5, warning= FALSE, message=FALSE}
+### plot scatter plot and check correlation
+## corp data is 1 year lagged
+
+  ggplot(data=Flow_HAB4[!is.na(Flow_HAB4$total_p2o5_metric_ton ),  ], aes(x= total_p2o5_metric_ton , y=severity_index     ) ) +
+      geom_point(alpha=0.6, size=2, col=2) +
+      labs(x= "Phosphate use in the previous year (metric tons)", y= "HAB severity",
+           title= "HAB Severity ~ Phosphate fertilizer (1 year lagged) ")+
+        geom_smooth(method='lm', se=F)+  theme_classic(base_size = 13) + 
+      geom_text(aes(label = year), 
+            hjust = 0.3, vjust = -0.3, size = 4) +   # adjust position as needed
+       stat_cor(method2 = 'pearson', size=5) 
+
+
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
