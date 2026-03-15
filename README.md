@@ -1,2 +1,2 @@
 # MTFC project
- 25-26 MTFC (https://www.mtfchallenge.org/) risk analysis. 
+ 25-26 MTFC (https://www.mtfchallenge.org/) risk analysis using R. 
